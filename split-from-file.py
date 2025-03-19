@@ -12,11 +12,11 @@ def extract_tail_number(message):
 
 def determine_message_type(message):
     """Determine if a message is CPDLC, ADS-C, MIAM or other."""
-    if "FANS-1/A CPDLC Message:" in message:
+    if "FANS-1/A CPDLC" in message:
         return "CPDLC"
-    elif "ADS-C message:" in message:
+    elif "ADS-C" in message:
         return "ADS-C"
-    elif "MIAM:" in message:
+    elif "MIAM" in message:
         return "MIAM"
     else:
         return "OTHER"
