@@ -3,7 +3,7 @@
 Multi-Port ACARS Message Processor
 
 This script listens on multiple UDP ports for ACARS messages from different Jaero instances,
-processes them, and splits them into separate files based on their message labels.
+processes them, and splits them into separate files based on various message criteria.
 """
 
 import asyncio
@@ -12,7 +12,7 @@ import os
 import re
 import sys
 import time
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Any
 
 class AcarsProtocol(asyncio.DatagramProtocol):
     """Protocol for handling UDP datagrams containing ACARS messages."""
@@ -77,56 +77,139 @@ class AcarsProcessor:
         if 'host' not in config:
             config['host'] = '127.0.0.1'
         if 'output_dir' not in config:
-            config['output_dir'] = 'acars_by_label'
+            config['output_dir'] = 'acars_split'
         if 'buffer_timeout' not in config:
             config['buffer_timeout'] = 60
+        if 'split_by' not in config:
+            config['split_by'] = 'label'  # Default to label
         if 'ports' not in config or not config['ports']:
             raise ValueError("No UDP ports specified in the configuration file")
             
+        # Validate split_by
+        valid_split_methods = ['label', 'tail', 'type', 'keyword']
+        if config['split_by'] not in valid_split_methods:
+            print(f"Warning: Invalid split_by value: '{config['split_by']}'. Using 'label' instead.", file=sys.stderr)
+            config['split_by'] = 'label'
+            
+        # Ensure keyword is set if splitting by keyword
+        if config['split_by'] == 'keyword' and ('keyword' not in config or not config['keyword']):
+            print(f"Warning: split_by is 'keyword' but no keyword specified. Using 'label' instead.", file=sys.stderr)
+            config['split_by'] = 'label'
+            
         return config
     
-    def parse_acars_message(self, message: str) -> Tuple[Optional[str], str]:
+    def extract_tail_number(self, message: str) -> Optional[str]:
         """
-        Parse an ACARS message and extract its label.
+        Extract the tail number from an ACARS message.
         
         Args:
             message: A complete ACARS message
             
         Returns:
-            tuple: (label, message) or (None, message) if no label found
+            str: Tail number or None if not found
         """
-        # Extract the first line of the message (header line)
-        first_line = message.split('\n')[0].strip()
-        
-        # The format appears to be consistent with fields separated by spaces
-        # After the timestamp, metadata, and aircraft ID, we have delimiter, label, etc.
-        # Example: 00:16:25 18-03-25 UTC AES:E4920F GES:D0 2 ..PTZNG 2 52 A
-        parts = first_line.split()
-        
-        # We need at least 9 parts to have a label
-        if len(parts) >= 9:
-            # The label should be at a specific position (9th item)
-            label_position = 8  # 0-indexed, so this is the 9th item
-            if label_position < len(parts):
-                label = parts[label_position]
-                # Verify it's a valid label (alphanumeric)
-                if re.match(r'^[A-Za-z0-9]+$', label):
-                    return label, message
-        
-        return None, message
+        match = re.search(r'AES:[A-F0-9]+\s+GES:[A-Z0-9]+\s+\d+\s+(\.?[A-Za-z0-9-]+)', message)
+        if match:
+            return match.group(1).strip('.')
+        return None
     
-    def append_message_to_file(self, label: Optional[str], message: str) -> None:
+    def determine_message_type(self, message: str) -> str:
         """
-        Append a message to the appropriate file based on its label.
+        Determine if a message is CPDLC, ADS-C, MIAM or other.
         
         Args:
-            label: Message label or None for unlabeled messages
+            message: A complete ACARS message
+            
+        Returns:
+            str: Message type ('CPDLC', 'ADS-C', 'MIAM', or 'OTHER')
+        """
+        if "FANS-1/A CPDLC" in message:
+            return "CPDLC"
+        elif "ADS-C" in message:
+            return "ADS-C"
+        elif "MIAM" in message:
+            return "MIAM"
+        else:
+            return "OTHER"
+    
+    def contains_keyword(self, message: str, keyword: str) -> bool:
+        """
+        Check if a message contains a specific keyword (case-insensitive).
+        
+        Args:
+            message: A complete ACARS message
+            keyword: Keyword to search for
+            
+        Returns:
+            bool: True if the message contains the keyword, False otherwise
+        """
+        return keyword.lower() in message.lower()
+    
+    def extract_message_label(self, message: str) -> Optional[str]:
+        """
+        Extract the message label from an ACARS message.
+        
+        Args:
+            message: A complete ACARS message
+            
+        Returns:
+            str: Message label or None if not found
+        """
+        match = re.search(r'!\s+([A-Za-z0-9]{2})\s+[A-Za-z0-9]', message)
+        if match:
+            return match.group(1)
+        return None
+    
+    def get_split_key(self, message: str) -> Optional[str]:
+        """
+        Get the appropriate key for splitting based on the configuration.
+        
+        Args:
+            message: A complete ACARS message
+            
+        Returns:
+            str: The key to split by or None if no key could be determined
+        """
+        split_by = self.config['split_by']
+        
+        if split_by == 'label':
+            return self.extract_message_label(message)
+        elif split_by == 'tail':
+            return self.extract_tail_number(message)
+        elif split_by == 'type':
+            return self.determine_message_type(message)
+        elif split_by == 'keyword':
+            keyword = self.config['keyword']
+            if self.contains_keyword(message, keyword):
+                return f"containing_{keyword}"
+            else:
+                return f"not_containing_{keyword}"
+        
+        return None
+    
+    def append_message_to_file(self, key: Optional[str], message: str) -> None:
+        """
+        Append a message to the appropriate file based on its split key.
+        
+        Args:
+            key: The key to split by or None for unclassified messages
             message: The ACARS message to append
         """
-        if label:
-            output_file = os.path.join(self.config['output_dir'], f"acars_{label}.txt")
+        split_by = self.config['split_by']
+        
+        if key:
+            if split_by == 'label':
+                output_file = os.path.join(self.config['output_dir'], f"acars_label_{key}.txt")
+            elif split_by == 'tail':
+                output_file = os.path.join(self.config['output_dir'], f"acars_tail_{key}.txt")
+            elif split_by == 'type':
+                output_file = os.path.join(self.config['output_dir'], f"acars_type_{key}.txt")
+            elif split_by == 'keyword':
+                output_file = os.path.join(self.config['output_dir'], f"acars_{key}.txt")
+            else:
+                output_file = os.path.join(self.config['output_dir'], f"acars_unclassified.txt")
         else:
-            output_file = os.path.join(self.config['output_dir'], "acars_unlabeled.txt")
+            output_file = os.path.join(self.config['output_dir'], "acars_unclassified.txt")
         
         # Check if the file exists and has content
         file_exists = os.path.exists(output_file)
@@ -167,10 +250,16 @@ class AcarsProcessor:
             # Extract the complete message
             message = buffer[start_pos:end_pos].strip()
             
-            # Process the message
-            label, full_message = self.parse_acars_message(message)
-            self.append_message_to_file(label, full_message)
-            print(f"Port {port}: Processed message with label: {label or 'None'}")
+            # Get the key for splitting
+            split_key = self.get_split_key(message)
+            
+            # Append the message to the appropriate file
+            self.append_message_to_file(split_key, message)
+            
+            split_by = self.config['split_by']
+            split_name = split_key if split_key else "unclassified"
+            print(f"Port {port}: Processed message with {split_by}: {split_name}")
+            
             messages_processed += 1
         
         # Keep the last (potentially incomplete) message in the buffer
@@ -216,9 +305,13 @@ class AcarsProcessor:
                     if match:
                         # We have at least one timestamp, try to process it as a message
                         message = self.buffers[port][match.start():].strip()
-                        label, full_message = self.parse_acars_message(message)
-                        self.append_message_to_file(label, full_message)
-                        print(f"Port {port}: Processed timeout message with label: {label or 'None'}")
+                        split_key = self.get_split_key(message)
+                        self.append_message_to_file(split_key, message)
+                        
+                        split_by = self.config['split_by']
+                        split_name = split_key if split_key else "unclassified"
+                        print(f"Port {port}: Processed timeout message with {split_by}: {split_name}")
+                        
                         self.buffers[port] = ""
                         self.last_process_times[port] = current_time
     
@@ -246,6 +339,16 @@ class AcarsProcessor:
         """
         # Create the output directory
         os.makedirs(self.config['output_dir'], exist_ok=True)
+        
+        # Print configuration information
+        print(f"ACARS Message Processor Configuration:")
+        print(f"  Host: {self.config['host']}")
+        print(f"  Ports: {', '.join(map(str, self.config['ports']))}")
+        print(f"  Output Directory: {self.config['output_dir']}")
+        print(f"  Split by: {self.config['split_by']}")
+        if self.config['split_by'] == 'keyword':
+            print(f"  Keyword: {self.config['keyword']}")
+        print(f"  Buffer Timeout: {self.config['buffer_timeout']} seconds")
         
         # Initialize buffers and last process times
         for port in self.config['ports']:

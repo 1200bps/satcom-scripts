@@ -1,6 +1,9 @@
 {
     "host": "127.0.0.1",
     "ports": [5550, 5551, 5552, 5553],
-    "output_dir": "acars_by_label",
-    "buffer_timeout": 60
+    "output_dir": "acars_split",
+    "buffer_timeout": 60,
+    "split_by": "label",
+    "keyword": "SECURITY"
 }
+
