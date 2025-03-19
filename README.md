@@ -12,7 +12,7 @@ Usage:
 `python3 split-from-file.py acars-log.txt -m -o messages_by_type/`
 
 ### split-from-streams
-Bind to an IP and accept messages by UDP on one or several ports, splitting to files by label field.
+Bind to an IP and accept messages by UDP on one or several ports, splitting to files by `label`, `tail`, `type`, `keyword`.
 
 Usage:
 `python3 split-from-streams.py config.json`
